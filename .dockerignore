@@ -1,0 +1,33 @@
+# ==============================================================================
+# Docker Build Exclusion Specifications (.dockerignore)
+# Purpose: Excludes local virtual environments (.venv), weight files (*.pt), git data,
+#          and temporary test files from Docker container context layers.
+# ==============================================================================
+
+# Exclude model weights from direct container copy (pulled from GCS dynamically on startup)
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# Exclude virtual environments & python build/cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Exclude git repository data & temporary local test files
+.git/
+.gitignore
+pred.txt
+test_api.py
+verify_vertex_endpoint.py
+test_instances.json
+deployment_commands.md
+*.md
