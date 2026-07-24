@@ -1,0 +1,23 @@
+# ==============================================================================
+# Google Cloud Build Upload Exclusion Specifications (.gcloudignore)
+# Purpose: Optimizes tarball packaging speed during `gcloud builds submit` by
+#          excluding local virtual environments (.venv), weights, and cache files.
+# ==============================================================================
+
+.gcloudignore
+*.pt
+*.pth
+*.ckpt
+*.bin
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg-info/
+.eggs/
+.git/
+pred.txt

@@ -1,0 +1,9 @@
+{
+  "instances": [
+    {
+      "smiles": "CC(=O)OCC",
+      "n_best": 3
+    }
+  ]
+}
+
