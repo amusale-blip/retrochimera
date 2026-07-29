@@ -1,46 +1,55 @@
 """
 FastAPI Microservice Server for RetroChimera Retrosynthesis Model.
+
 Provides /health (liveness probe) and /predict (vectorized SMILES translation/ranking) routes.
 Handles dynamic CPU/GPU hardware sensing, PyTorch model weight loading from GCS,
 and exposes Vertex AI compliant HTTP endpoints.
 """
 
+import logging
+import math
 import os
+import sys
+from contextlib import asynccontextmanager
+from typing import Any, Dict, List, Optional
+
+from fastapi import FastAPI, HTTPException, status
+from pydantic import BaseModel, Field
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
 
-import sys
-import math
-from typing import List
-from fastapi import FastAPI, HTTPException, status
-from pydantic import BaseModel
-
-app = FastAPI(title="RetroChimera Vertex AI Service")
+# Configure structured production logger
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("retrochimera-service")
 
 # Global predictor instance reference
-predictor_instance = None
+predictor_instance: Optional[Any] = None
 
 
 def sanitize_smiles(smiles: str) -> str:
-    """Sanitize SMILES string for RetroChimera evaluation."""
+    """Sanitize and strip input SMILES string."""
     return smiles.strip()
 
 
-@app.on_event("startup")
-def startup_event():
+def initialize_predictor() -> None:
+    """Initialize RetroChimera predictor model or fallback mock predictor."""
     global predictor_instance
 
     if os.environ.get("MOCK_TRANSLATOR") == "1":
-        print("Starting in MOCK_TRANSLATOR mode. Model loading skipped.")
+        logger.info("Starting in MOCK_TRANSLATOR mode. Model loading skipped.")
 
         class MockRetroChimeraPredictor:
             def predict(self, smiles_list: List[str], n_best: int = 10):
                 all_scores = []
                 all_preds = []
-                for smiles in smiles_list:
+                for _ in smiles_list:
                     all_scores.append([-0.1625, -0.2231, -0.3567][:n_best])
                     all_preds.append([["CC(=O)O", "CCO"], ["CC(=O)Cl", "CCO"], ["CC(=O)O"]][:n_best])
                 return all_scores, all_preds
@@ -61,23 +70,23 @@ def startup_event():
             os.environ["RETROCHIMERA_MODEL_PATH"] = local_model_path
 
         if not os.path.exists(local_model_path):
-            print(f"GCS URI detected ({os.environ.get('AIP_STORAGE_URI')}). Downloading checkpoint from GCS...")
+            logger.info("GCS URI detected (%s). Downloading checkpoint from GCS...", os.environ.get("AIP_STORAGE_URI"))
             try:
                 from download_weights import download_model_weights
                 download_model_weights()
             except Exception as e:
-                print(f"Error executing download_weights: {e}", file=sys.stderr)
+                logger.error("Error executing download_weights: %s", e, exc_info=True)
         else:
-            print(f"GCS model weights already downloaded locally at: {local_model_path}")
+            logger.info("GCS model weights already downloaded locally at: %s", local_model_path)
 
         model_path = local_model_path
     else:
         if os.path.exists(local_model_path):
             model_path = local_model_path
         else:
-            print("Warning: Model checkpoint path not found in environment or disk. Running mock mode fallback.", file=sys.stderr)
+            logger.warning("Model checkpoint path not found on disk. Falling back to mock predictor.")
             os.environ["MOCK_TRANSLATOR"] = "1"
-            startup_event()
+            initialize_predictor()
             return
 
     # Sensing CUDA hardware
@@ -85,32 +94,49 @@ def startup_event():
         import torch
         if torch.cuda.is_available():
             gpu_id = int(os.environ.get("GPU_ID", "0"))
-            print(f"CUDA GPU is available. Using GPU ID: {gpu_id}")
+            logger.info("CUDA GPU is available. Using GPU ID: %d", gpu_id)
         else:
-            print("CUDA GPU is not available. Using CPU.")
+            logger.info("CUDA GPU is not available. Running on CPU.")
     except ImportError:
-        print("PyTorch not installed. Running in CPU mode.")
+        logger.info("PyTorch not installed. Running in CPU mode.")
 
-    print(f"Loading RetroChimera model from: {model_path}")
+    logger.info("Loading RetroChimera model weights from: %s", model_path)
+
     class RetroChimeraPredictor:
-        def __init__(self, weights_path):
+        def __init__(self, weights_path: str):
             self.weights_path = weights_path
+
         def predict(self, smiles_list: List[str], n_best: int = 10):
             all_scores = []
             all_preds = []
-            for smiles in smiles_list:
+            for _ in smiles_list:
                 all_scores.append([-0.05, -0.12, -0.25][:n_best])
                 all_preds.append([["CC(=O)O", "CCO"], ["CC(=O)Cl", "CCO"], ["CC(=O)O"]][:n_best])
             return all_scores, all_preds
 
     predictor_instance = RetroChimeraPredictor(model_path)
-    print("RetroChimera model loaded successfully.")
+    logger.info("RetroChimera model initialized successfully.")
 
 
-# Vertex AI Pydantic schemas
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup model initialization."""
+    initialize_predictor()
+    yield
+
+
+app = FastAPI(
+    title="RetroChimera Vertex AI Service",
+    description="Production Microservice for Microsoft RetroChimera Retrosynthesis Model",
+    version="1.2.0",
+    lifespan=lifespan
+)
+
+
+# Vertex AI Pydantic Schemas
 class Instance(BaseModel):
-    smiles: str
-    n_best: int = 10
+    smiles: str = Field(..., description="Target SMILES string for retrosynthetic expansion")
+    n_best: int = Field(default=10, description="Number of precursor predictions to retrieve")
 
 
 class PredictionRequest(BaseModel):
@@ -130,18 +156,21 @@ class PredictionResponse(BaseModel):
     predictions: List[PredictionResult]
 
 
-@app.get("/health")
-def health():
+@app.get("/", tags=["Health"])
+@app.get("/health", tags=["Health"])
+def health_check() -> Dict[str, str]:
+    """Health check liveness & readiness probe endpoint."""
     if predictor_instance is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Model is still loading or failed to initialize."
+            detail="Model is still initializing or unavailable."
         )
     return {"status": "healthy"}
 
 
-@app.post("/predict", response_model=PredictionResponse)
-def predict(request: PredictionRequest):
+@app.post("/predict", response_model=PredictionResponse, tags=["Inference"])
+def predict(request: PredictionRequest) -> PredictionResponse:
+    """Predict retrosynthetic precursor molecules for input target SMILES list."""
     if predictor_instance is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -183,9 +212,10 @@ def predict(request: PredictionRequest):
         return PredictionResponse(predictions=predictions_output)
 
     except Exception as e:
+        logger.error("Prediction failed: %s", e, exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Prediction failed with exception: {str(e)}"
+            detail=f"Prediction failed: {str(e)}"
         )
 
 

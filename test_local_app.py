@@ -9,21 +9,21 @@ os.environ["MOCK_TRANSLATOR"] = "1"
 from fastapi.testclient import TestClient
 import app as app_module
 
-# Trigger startup event to initialize predictor in mock mode
-app_module.startup_event()
+# Trigger predictor initialization in mock mode
+app_module.initialize_predictor()
 
 client = TestClient(app_module.app)
 
+
 def test_health():
-    print("\n--- Testing GET /health ---")
+    """Test GET /health liveness probe."""
     response = client.get("/health")
-    print("Status Code:", response.status_code)
-    print("Response JSON:", response.json())
     assert response.status_code == 200
     assert response.json() == {"status": "healthy"}
 
+
 def test_predict():
-    print("\n--- Testing POST /predict ---")
+    """Test POST /predict retrosynthetic precursor prediction."""
     payload = {
         "instances": [
             {
@@ -33,13 +33,12 @@ def test_predict():
         ]
     }
     response = client.post("/predict", json=payload)
-    print("Status Code:", response.status_code)
-    print("Response JSON:", response.json())
     assert response.status_code == 200
     res_data = response.json()
     assert "predictions" in res_data
     assert len(res_data["predictions"]) == 1
     assert len(res_data["predictions"][0]["results"]) == 3
+
 
 if __name__ == "__main__":
     test_health()
